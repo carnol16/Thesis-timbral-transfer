@@ -1,0 +1,28 @@
+# Python bytecode & cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.cache/
+
+# Virtual Environments
+.venv/
+sa_venv/
+env/
+venv/
+
+# Cloned repos (downloaded automatically at install time)
+stable-audio-3/
+
+# Model weights (hosted on Hugging Face: carnol16/timbral-transfer)
+checkpoints/*.pt
+hf_cache/
+
+# Generated outputs & temp artifacts
+artifacts/temp_*
+artifacts/custom_latent.npy
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
