@@ -9,7 +9,8 @@ INSTRUMENT_CHOICES = [f"{v} (ID {k})" for k, v in INSTRUMENT_NAMES.items()]
 def label_to_id(label):
     return int(label.split("ID ")[-1].rstrip(")"))
 
-def generate(audio_path, instrument_label, cfg_scale, ddim_steps_preset, octave_shift_choice, progress=gr.Progress()):
+def generate(audio_path, instrument_label, cfg_scale, ddim_steps_preset, octave_shift_choice,
+             show_plots=False, use_lora=True, lora_strength=1.0, custom_lora=None, progress=gr.Progress()):
     if audio_path is None:
         raise gr.Error("Please upload an audio file first.")
 
@@ -28,6 +29,8 @@ def generate(audio_path, instrument_label, cfg_scale, ddim_steps_preset, octave_
     }
     octave_shift = octave_map.get(octave_shift_choice, "Auto")
 
+    custom_lora_path = custom_lora if isinstance(custom_lora, str) else (custom_lora.name if custom_lora is not None else None)
+
     def progress_cb(step, total):
         if step == 0:
             progress(0, desc="Encoding audio & extracting contours...")
@@ -40,62 +43,67 @@ def generate(audio_path, instrument_label, cfg_scale, ddim_steps_preset, octave_
         cfg_scale=float(cfg_scale),
         ddim_steps=int(ddim_steps),
         octave_shift=octave_shift,
+        use_lora=bool(use_lora),
+        lora_strength=float(lora_strength),
+        custom_lora_path=custom_lora_path,
         progress_cb=progress_cb,
     )
     
-    progress(0.9, desc="Generating debug plots (spectrograms & contours)...")
-    import matplotlib.pyplot as plt
-    import numpy as np
-    import librosa
-    from data.contour import extract_contours, pyin_pitch
-    
-    seq_len = contour.shape[1]
-    out_contour = extract_contours(audio_out.flatten(), target_len=seq_len)
-    
-    # Track generated audio with pYIN for pitch evaluation
-    pyin_f0, pyin_voiced, pyin_ap = pyin_pitch(audio_out.flatten(), target_len=seq_len)
-    out_contour[0] = pyin_f0
-    out_contour[1] = pyin_voiced
-    out_contour[4] = pyin_ap
-    
-    # contour returned from engine is already in physical units
-    unnorm_contour = contour
-    
-    fig, axes = plt.subplots(8, 1, figsize=(10, 20), sharex=False)
-    
-    # 1. Input Spectrogram
-    D_in = librosa.amplitude_to_db(np.abs(librosa.stft(audio_in)), ref=np.max)
-    librosa.display.specshow(D_in, sr=sr, x_axis='time', y_axis='log', ax=axes[0])
-    axes[0].set_title("Input Spectrogram")
-    
-    # 2. Output Spectrogram
-    D_out = librosa.amplitude_to_db(np.abs(librosa.stft(audio_out.flatten())), ref=np.max)
-    librosa.display.specshow(D_out, sr=sr, x_axis='time', y_axis='log', ax=axes[1])
-    axes[1].set_title("Output Spectrogram")
-    
-    # 3-8. Contours
-    titles = [
-        "Log-F0 (Pitch)",
-        "Voiced (Confidence)",
-        "RMS (Volume)",
-        "Onset (Attack)",
-        "Aperiodicity",
-        "Spectral Centroid"
-    ]
-    
-    for i in range(6):
-        ax = axes[i + 2]
-        real_val = unnorm_contour[i] if i < 6 else np.zeros(seq_len)
-        gen_val = out_contour[i]
+    fig = None
+    if show_plots:
+        progress(0.9, desc="Generating debug plots (spectrograms & contours)...")
+        import matplotlib.pyplot as plt
+        import numpy as np
+        import librosa
+        from data.contour import extract_contours, pyin_pitch
         
-        ax.plot(real_val, label="Real (Input / Shifted)", color="pink", linewidth=2.5)
-        ax.plot(gen_val, label="Generated", color="blue", linestyle="--")
+        seq_len = contour.shape[1]
+        out_contour = extract_contours(audio_out.flatten(), target_len=seq_len)
         
-        ax.set_title(titles[i])
-        ax.legend(loc="upper right")
-    
-    axes[-1].set_xlabel("Latent Time Steps")
-    plt.tight_layout()
+        # Track generated audio with pYIN for pitch evaluation
+        pyin_f0, pyin_voiced, pyin_ap = pyin_pitch(audio_out.flatten(), target_len=seq_len)
+        out_contour[0] = pyin_f0
+        out_contour[1] = pyin_voiced
+        out_contour[4] = pyin_ap
+        
+        # contour returned from engine is already in physical units
+        unnorm_contour = contour
+        
+        fig, axes = plt.subplots(8, 1, figsize=(10, 20), sharex=False)
+        
+        # 1. Input Spectrogram
+        D_in = librosa.amplitude_to_db(np.abs(librosa.stft(audio_in)), ref=np.max)
+        librosa.display.specshow(D_in, sr=sr, x_axis='time', y_axis='log', ax=axes[0])
+        axes[0].set_title("Input Spectrogram")
+        
+        # 2. Output Spectrogram
+        D_out = librosa.amplitude_to_db(np.abs(librosa.stft(audio_out.flatten())), ref=np.max)
+        librosa.display.specshow(D_out, sr=sr, x_axis='time', y_axis='log', ax=axes[1])
+        axes[1].set_title("Output Spectrogram")
+        
+        # 3-8. Contours
+        titles = [
+            "Log-F0 (Pitch)",
+            "Voiced (Confidence)",
+            "RMS (Volume)",
+            "Onset (Attack)",
+            "Aperiodicity",
+            "Spectral Centroid"
+        ]
+        
+        for i in range(6):
+            ax = axes[i + 2]
+            real_val = unnorm_contour[i] if i < 6 else np.zeros(seq_len)
+            gen_val = out_contour[i]
+            
+            ax.plot(real_val, label="Real (Input / Shifted)", color="pink", linewidth=2.5)
+            ax.plot(gen_val, label="Generated", color="blue", linestyle="--")
+            
+            ax.set_title(titles[i])
+            ax.legend(loc="upper right")
+        
+        axes[-1].set_xlabel("Latent Time Steps")
+        plt.tight_layout()
     
     progress(1.0, desc="Done!")
     return (sr, audio_out), fig
@@ -142,6 +150,29 @@ with gr.Blocks(title="Timbre Transfer", theme=gr.themes.Soft()) as demo:
                 choices=["Fast (25)", "Normal (50)", "Quality (100)"],
                 value="Normal (50)",
             )
+
+            with gr.Accordion("Studio LoRA Personalization (Acoustic Presets)", open=True):
+                use_lora_chk = gr.Checkbox(
+                    label="Enable Studio LoRA Acoustic Enhancements",
+                    value=True,
+                    info="Applies real soloist recordings for Violin, Flute, Tenor Sax, Trumpet, Clarinet"
+                )
+                lora_strength_sld = gr.Slider(
+                    label="LoRA Acoustic Intensity",
+                    minimum=0.0, maximum=1.5, value=1.0, step=0.05,
+                    info="0.0 = Base Slakh Model, 1.0 = Studio Preset, 1.5 = Deep Body Resonance"
+                )
+                custom_lora_file = gr.File(
+                    label="Upload Custom Artist LoRA (.pt adapter)",
+                    file_types=[".pt"],
+                    type="filepath",
+                )
+
+            show_plots = gr.Checkbox(
+                label="Generate Debug Plots (Spectrograms & Contours)",
+                value=False,
+                info="Uncheck to generate audio faster (skips plot extraction).",
+            )
             generate_btn = gr.Button("🎻 Generate Transfer", variant="primary", size="lg")
 
         with gr.Column(scale=1):
@@ -155,14 +186,15 @@ with gr.Blocks(title="Timbre Transfer", theme=gr.themes.Soft()) as demo:
             
             gr.Markdown("""
             ### Tips
+            - **Studio LoRA**: Trained on uncompressed solo performer takes from Medley-solos-DB. Yields rich wooden resonance, breath air, and bow scrape.
             - **Auto Octave**: Snaps the melody up/down by integer octaves to land in the target instrument's playable register while preserving all notes and musical key.
             - **CFG Scale 2.5–3.5**: Natural instrument timbre with solid melody adherence.
-            - **CFG Scale 5.0–8.0**: High contour enforcement (strong pitch vibrato & dynamics).
             - **Diffusion Steps**: 25 is fast preview; 50 is recommended; 100 provides highest texture quality.
             """)
 
     generate_btn.click(
         fn=generate,
-        inputs=[audio_in, instrument, cfg_scale, ddim_steps, octave_shift],
+        inputs=[audio_in, instrument, cfg_scale, ddim_steps, octave_shift, show_plots,
+                use_lora_chk, lora_strength_sld, custom_lora_file],
         outputs=[audio_out, debug_plot],
     )

@@ -1,0 +1,14 @@
+torch 
+torchvision 
+torchaudio 
+numpy
+scipy
+librosa
+torchcrepe
+gradio
+matplotlib
+tqdm
+einops
+rotary-embedding-torch
+huggingface_hub
+soundfile

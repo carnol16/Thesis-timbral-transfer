@@ -16,6 +16,8 @@ stable-audio-3/
 
 # Model weights (hosted on Hugging Face: carnol16/timbral-transfer)
 checkpoints/*.pt
+checkpoints/lora/*.pt
+*.pt
 hf_cache/
 
 # Generated outputs & temp artifacts

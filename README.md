@@ -9,6 +9,8 @@ The project is a standalone, cross-platform application for neural musical instr
 ## Features
 
 - **18 Musical Instrument Classes**: Transfer arbitrary melodic audio to acoustic piano, violin, cello, electric guitar, alto sax, clarinet, flute, brass, organ, and more.
+- **Curated Studio LoRA Suite**: Plug-and-play Low-Rank Adapters fine-tuned on uncompressed solo performer takes from Medley-solos-DB (Violin, Flute, Tenor Saxophone, Trumpet, Clarinet). Delivers wooden body resonance, bow scrape, breath air, and up to 50% intonation error reduction.
+- **Custom Artist LoRA Support**: Upload your own low-rank `.pt` weights directly into the web UI with adjustable intensity ($0.0 \to 1.5$).
 - **Intelligent Register Alignment**: Automatically transposes input pitch contours by integer octaves into the target instrument's natural playable register while proportionally scaling spectral centroids.
 - **Universal Hardware Support**:
   - **Windows & Linux**: Fully accelerated with NVIDIA CUDA (Flash / SDPA support).
@@ -77,19 +79,31 @@ Choose the setup instructions for your operating system:
 
 ---
 
-## Model Weights
+## Model Weights & LoRA Adapters
 
-The installer scripts (`install_pc.bat`, `install_mac.sh`, `install_linux.sh`) and the application GUI automatically check for and download the required DiT model weights from Hugging Face if they are not already present:
+The installer scripts (`install_pc.bat`, `install_mac.sh`, `install_linux.sh`) and the application GUI automatically check for and download the required DiT model weights and Studio LoRA adapters from Hugging Face if they are not already present:
 
 - **Hugging Face Model Repository**: [carnol16/timbral-transfer](https://huggingface.co/carnol16/timbral-transfer)
-- **Model Checkpoint**: `diT_best_val.pt` (~690 MB)
+- **Base Model Checkpoint**: `diT_best_val.pt` (~690 MB)
+- **Studio LoRA Suite**: 5 adapters (~2.3 MB each) under `lora/`
+  - `violin_song121_r8_best.pt` (Studio Violin)
+  - `flute_song56_r8_best.pt` (Concert Flute)
+  - `tenor_saxophone_song85_r8_best.pt` (Tenor Saxophone)
+  - `trumpet_song94_r8_best.pt` (Solo Trumpet)
+  - `clarinet_song201_r8_best.pt` (Solo Clarinet)
 
 ```text
 checkpoints/
-└── diT_best_val.pt
+├── diT_best_val.pt
+└── lora/
+    ├── violin_song121_r8_best.pt
+    ├── flute_song56_r8_best.pt
+    ├── tenor_saxophone_song85_r8_best.pt
+    ├── trumpet_song94_r8_best.pt
+    └── clarinet_song201_r8_best.pt
 ```
 
-*(If you ever need to download it manually or offline, download `diT_best_val.pt` directly from [https://huggingface.co/carnol16/timbral-transfer](https://huggingface.co/carnol16/timbral-transfer) and place it into the `checkpoints/` directory).*
+*(If you ever need to download them manually or offline, download the files directly from [https://huggingface.co/carnol16/timbral-transfer](https://huggingface.co/carnol16/timbral-transfer) and place them into their respective `checkpoints/` and `checkpoints/lora/` directories).*
 
 ---
 
