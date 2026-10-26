@@ -6,6 +6,14 @@ from misc_tools.gui.inference import engine, INSTRUMENT_NAMES
 
 INSTRUMENT_CHOICES = [f"{v} (ID {k})" for k, v in INSTRUMENT_NAMES.items()]
 
+OPTIMAL_PRESETS = {
+    17: {"cfg": 3.0, "lora": 0.75},   # Studio Violin (Sweep s*=3.0, lambda*=0.75)
+    7:  {"cfg": 2.0, "lora": 0.75},   # Clarinet (Sweep s*=2.0, lambda*=0.75)
+    12: {"cfg": 2.5, "lora": 1.25},   # Concert Flute (Sweep s*=2.5, lambda*=1.25)
+    3:  {"cfg": 5.0, "lora": 1.25},   # Tenor Saxophone (Sweep s*=5.0, lambda*=1.25)
+    16: {"cfg": 3.5, "lora": 1.25},   # Solo Trumpet (Sweep s*=3.5, lambda*=1.25)
+}
+
 def label_to_id(label):
     return int(label.split("ID ")[-1].rstrip(")"))
 
@@ -20,14 +28,14 @@ def generate(audio_path, instrument_label, cfg_scale, ddim_steps_preset, octave_
     ddim_steps = steps_map.get(ddim_steps_preset, 50)
 
     octave_map = {
+        "No Shift (Original Pitch)": 0,
+        "+1 Octave": 1,
+        "-1 Octave": -1,
         "Auto (Match Instrument Range)": "Auto",
         "+2 Octaves": 2,
-        "+1 Octave": 1,
-        "No Shift (0)": 0,
-        "-1 Octave": -1,
         "-2 Octaves": -2,
     }
-    octave_shift = octave_map.get(octave_shift_choice, "Auto")
+    octave_shift = octave_map.get(octave_shift_choice, 0)
 
     custom_lora_path = custom_lora if isinstance(custom_lora, str) else (custom_lora.name if custom_lora is not None else None)
 
@@ -106,7 +114,13 @@ def generate(audio_path, instrument_label, cfg_scale, ddim_steps_preset, octave_
         plt.tight_layout()
     
     progress(1.0, desc="Done!")
-    return (sr, audio_out), fig
+    # Convert float32 [-1, 1] to int16 to avoid Gradio browser player format warning
+    import numpy as np
+    if audio_out.dtype != np.int16:
+        audio_out_int16 = (np.clip(audio_out, -1.0, 1.0) * 32767.0).astype(np.int16)
+    else:
+        audio_out_int16 = audio_out
+    return (sr, audio_out_int16), fig
 
 
 with gr.Blocks(title="Timbre Transfer", theme=gr.themes.Soft()) as demo:
@@ -132,18 +146,19 @@ with gr.Blocks(title="Timbre Transfer", theme=gr.themes.Soft()) as demo:
             octave_shift = gr.Dropdown(
                 label="Octave Transposition (Pitch Snapping)",
                 choices=[
+                    "No Shift (Original Pitch)",
+                    "+1 Octave",
+                    "-1 Octave",
                     "Auto (Match Instrument Range)",
                     "+2 Octaves",
-                    "+1 Octave",
-                    "No Shift (0)",
-                    "-1 Octave",
                     "-2 Octaves",
                 ],
-                value="Auto (Match Instrument Range)",
+                value="No Shift (Original Pitch)",
+                info="Keep 'No Shift' to preserve natural pitch confidence. Use +1/-1 octave only if manually desired."
             )
             cfg_scale = gr.Slider(
                 label="CFG Scale (higher = stronger contour guidance)",
-                minimum=1.0, maximum=10.0, value=3.0, step=0.5,
+                minimum=1.0, maximum=10.0, value=5.0, step=0.5,
             )
             ddim_steps = gr.Radio(
                 label="Diffusion Steps",
@@ -159,8 +174,8 @@ with gr.Blocks(title="Timbre Transfer", theme=gr.themes.Soft()) as demo:
                 )
                 lora_strength_sld = gr.Slider(
                     label="LoRA Acoustic Intensity",
-                    minimum=0.0, maximum=1.5, value=1.0, step=0.05,
-                    info="0.0 = Base Slakh Model, 1.0 = Studio Preset, 1.5 = Deep Body Resonance"
+                    minimum=0.0, maximum=1.5, value=0.75, step=0.05,
+                    info="0.0 = Pure Base Model, 0.75 = Empirical Sweet Spot (Peak Intonation & Texture), 1.5 = Deep Body Resonance"
                 )
                 custom_lora_file = gr.File(
                     label="Upload Custom Artist LoRA (.pt adapter)",
@@ -191,6 +206,17 @@ with gr.Blocks(title="Timbre Transfer", theme=gr.themes.Soft()) as demo:
             - **CFG Scale 2.5–3.5**: Natural instrument timbre with solid melody adherence.
             - **Diffusion Steps**: 25 is fast preview; 50 is recommended; 100 provides highest texture quality.
             """)
+
+    def on_instrument_change(inst_choice):
+        inst_id = label_to_id(inst_choice)
+        preset = OPTIMAL_PRESETS.get(inst_id, {"cfg": 3.0, "lora": 1.0})
+        return gr.update(value=preset["cfg"]), gr.update(value=preset["lora"])
+
+    instrument.change(
+        fn=on_instrument_change,
+        inputs=[instrument],
+        outputs=[cfg_scale, lora_strength_sld],
+    )
 
     generate_btn.click(
         fn=generate,

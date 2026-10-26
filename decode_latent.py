@@ -112,6 +112,11 @@ if __name__ == "__main__":
         for i, npy_path in enumerate(npy_files, 1):
             stem = os.path.splitext(os.path.basename(npy_path))[0]
             out_wav = os.path.join(args.out_dir, f"{stem}.wav")
+
+            # Skip if already cleanly decoded
+            if os.path.exists(out_wav) and os.path.getsize(out_wav) > 1000:
+                continue
+
             latent_np = np.load(npy_path)
             latent = torch.from_numpy(latent_np).to(DEVICE)
             latent = ensure_shape(latent)
@@ -120,6 +125,11 @@ if __name__ == "__main__":
             audio = audio.squeeze(0).cpu()
             audio = audio / max(audio.abs().max(), 1e-8) * 0.9
             torchaudio.save(out_wav, audio, 44100)
+
+            # Prevent VRAM cache accumulation across batch loops
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
             if i % 10 == 0 or i == len(npy_files):
                 print(f"[DECODE] [{i}/{len(npy_files)}] Saved {out_wav}")
         print(f"[DECODE] Batch decoding completed!")

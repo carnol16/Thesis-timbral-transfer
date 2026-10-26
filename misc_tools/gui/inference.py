@@ -255,21 +255,38 @@ class InferenceEngine:
             audio = audio[:, None]
         return audio
 
-    def _ddim_loop(self, cond_contour, instrument_id, cfg_scale, ddim_steps, progress_cb):
+    def _ddim_loop(self, cond_contour, instrument_id, cfg_scale, ddim_steps, progress_cb, cfg_inst_scale=1.8):
         seq_len = cond_contour.shape[1]
         x = torch.randn(1, seq_len, 256, device=DEVICE)
         acp = ALPHAS_CUMPROD.to(DEVICE)
         timesteps = torch.linspace(999, 0, ddim_steps, dtype=torch.long, device=DEVICE)
         inst_t = torch.tensor([instrument_id], dtype=torch.long, device=DEVICE)
+        zero_contour = torch.zeros_like(cond_contour)
 
         with torch.no_grad():
             for i in range(ddim_steps):
                 t_step = timesteps[i].item()
                 t = torch.tensor([t_step], device=DEVICE)
-                v_cond   = self.dit_model(x, t, cond_contour, instrument_id=inst_t)
-                # True CFG: Unconditioned drops BOTH contour (zeros) AND instrument (None)
-                v_uncond = self.dit_model(x, t, torch.zeros_like(cond_contour), instrument_id=None)
-                v_pred   = v_uncond + cfg_scale * (v_cond - v_uncond)
+
+                # Decoupled Two-Factor CFG:
+                # 1. Full prediction: conditioned on both contour and instrument
+                v_full = self.dit_model(x, t, cond_contour, instrument_id=inst_t)
+
+                if cfg_scale > 1.0 or cfg_inst_scale > 1.0:
+                    # 2. Contour-unconditioned prediction: conditioned on instrument only
+                    v_inst = self.dit_model(x, t, zero_contour, instrument_id=inst_t)
+                    delta_contour = v_full - v_inst
+
+                    if cfg_inst_scale > 1.0:
+                        # 3. Null prediction: unconditioned on both contour and instrument
+                        v_null = self.dit_model(x, t, zero_contour, instrument_id=None)
+                        delta_inst = v_inst - v_null
+                        # Independently amplify instrument timbre and melody contour
+                        v_pred = v_null + cfg_inst_scale * delta_inst + cfg_scale * delta_contour
+                    else:
+                        v_pred = v_inst + cfg_scale * delta_contour
+                else:
+                    v_pred = v_full
 
                 a_bar = acp[t_step]
                 prev_a_bar = torch.tensor(1.0, device=DEVICE) if i == ddim_steps - 1 else acp[timesteps[i+1].item()]
@@ -282,8 +299,9 @@ class InferenceEngine:
         return x
 
     def run_timbre_transfer(self, audio_path, instrument_id=17, cfg_scale=3.0,
-                            ddim_steps=50, octave_shift="Auto", use_lora=True,
-                            lora_strength=1.0, custom_lora_path=None, progress_cb=None):
+                            ddim_steps=50, octave_shift=0, use_lora=True,
+                            lora_strength=1.0, custom_lora_path=None, progress_cb=None,
+                            cfg_inst_scale=1.8):
         print(f"[GUI] Loading: {audio_path}")
 
         # Configure LoRA Adapter
@@ -331,6 +349,7 @@ class InferenceEngine:
         contour_6 = contour[:6, :].copy()
         
         # 1. REGISTER ALIGNMENT (Transpose into Target Instrument Range preserving musical key)
+        shift_octaves = 0
         voiced_mask = contour_6[1, :] > 0.5
         if voiced_mask.any():
             voiced_f0 = contour_6[0, voiced_mask]
@@ -373,10 +392,8 @@ class InferenceEngine:
 
             if shift_octaves != 0:
                 contour_shift = shift_octaves * np.log(2)
-                centroid_scale = 2.0 ** shift_octaves
                 contour_6[0, voiced_mask] += contour_shift
-                contour_6[5, voiced_mask] = np.clip(contour_6[5, voiced_mask] * centroid_scale, 0.0, SR / 2.0)
-                print(f"[GUI] Transposed melody by {shift_octaves:+d} octave(s) (centroid scaled {centroid_scale:.2f}x) to fit {INSTRUMENT_NAMES.get(instrument_id, '')}.")
+                print(f"[GUI] Transposed melody by {shift_octaves:+d} octave(s) to fit {INSTRUMENT_NAMES.get(instrument_id, '')}.")
             else:
                 print(f"[GUI] Preserved original pitch (0 octave shift). Within {INSTRUMENT_NAMES.get(instrument_id, '')} playable range.")
         
@@ -388,8 +405,8 @@ class InferenceEngine:
             .unsqueeze(0).transpose(1, 2).to(DEVICE)    # (1, seq_len, 6)
         )
 
-        print(f"[GUI] DDIM {ddim_steps} steps, CFG={cfg_scale}...")
-        latent_out = self._ddim_loop(cond_contour, instrument_id, cfg_scale, ddim_steps, progress_cb)
+        print(f"[GUI] DDIM {ddim_steps} steps, Contour-CFG={cfg_scale}, Inst-CFG={cfg_inst_scale}...")
+        latent_out = self._ddim_loop(cond_contour, instrument_id, cfg_scale, ddim_steps, progress_cb, cfg_inst_scale=cfg_inst_scale)
 
         print("[GUI] Decoding...")
         audio_out = self._decode(latent_out)
