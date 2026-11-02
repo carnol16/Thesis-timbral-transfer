@@ -28,3 +28,4 @@ artifacts/custom_latent.npy
 .DS_Store
 Thumbs.db
 
+.gradio/

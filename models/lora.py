@@ -5,6 +5,9 @@ import math
 class LoRALinear(nn.Module):
     def __init__(self, base_layer: nn.Linear, rank: int = 8, alpha: float = 16.0,dropout: float = 0.0):
         super().__init__()
+        if isinstance(base_layer, LoRALinear):
+            base_layer = base_layer.base_layer
+
         self.base_layer = base_layer
         self.rank = rank
         self.alpha = alpha
@@ -17,6 +20,8 @@ class LoRALinear(nn.Module):
 
         in_features = base_layer.in_features
         out_features = base_layer.out_features
+        self.in_features = in_features
+        self.out_features = out_features
         device = base_layer.weight.device
         dtype = base_layer.weight.dtype
 
@@ -51,24 +56,56 @@ class LoRALinear(nn.Module):
         #  Combine both paths
         return base_out + lora_out
 
+def unwrap_lora(model: nn.Module) -> nn.Module:
+    """Restores all LoRALinear layers back to their original frozen nn.Linear layers."""
+    if not hasattr(model, "blocks"):
+        return model
+    for block in model.blocks:
+        if hasattr(block, "attn"):
+            for attr in ("qkv", "proj"):
+                if hasattr(block.attn, attr):
+                    layer = getattr(block.attn, attr)
+                    if isinstance(layer, LoRALinear):
+                        setattr(block.attn, attr, layer.base_layer)
+        if hasattr(block, "mlp"):
+            for w_name in ("w1", "w2", "w3", "fc1", "fc2"):
+                if hasattr(block.mlp, w_name):
+                    layer = getattr(block.mlp, w_name)
+                    if isinstance(layer, LoRALinear):
+                        setattr(block.mlp, w_name, layer.base_layer)
+    return model
+
+
 def inject_lora(model: nn.Module, rank: int = 8, alpha: float = 16.0, dropout: float = 0.0, target_modules=("qkv", "proj")):
 
-    #Freezes the base model and injects LoRALinear into the attention layers of every DITBlock.
+    # First unwrap any existing LoRA layers to ensure clean base layers
+    unwrap_lora(model)
 
-    #Freeze every parameter in the entire base model
+    # Freezes the base model and injects LoRALinear into targeted layers of every DITBlock.
     for param in model.parameters():
         param.requires_grad = False
 
-    #walk through all blocks and replace targeted linear layers
+    # walk through all blocks and replace targeted linear layers
     injected_count = 0
     for i, block in enumerate(model.blocks):
         if hasattr(block, "attn"):
             if "qkv" in target_modules and hasattr(block.attn, "qkv"):
-                block.attn.qkv = LoRALinear(block.attn.qkv, rank=rank, alpha=alpha, dropout=dropout)
-                injected_count += 1
+                layer = block.attn.qkv
+                if isinstance(layer, nn.Linear):
+                    block.attn.qkv = LoRALinear(layer, rank=rank, alpha=alpha, dropout=dropout)
+                    injected_count += 1
             if "proj" in target_modules and hasattr(block.attn, "proj"):
-                block.attn.proj = LoRALinear(block.attn.proj, rank=rank, alpha=alpha, dropout=dropout)
-                injected_count += 1
+                layer = block.attn.proj
+                if isinstance(layer, nn.Linear):
+                    block.attn.proj = LoRALinear(layer, rank=rank, alpha=alpha, dropout=dropout)
+                    injected_count += 1
+        if hasattr(block, "mlp"):
+            for w_name in ("w1", "w2", "w3", "fc1", "fc2"):
+                if ("mlp" in target_modules or w_name in target_modules) and hasattr(block.mlp, w_name):
+                    layer = getattr(block.mlp, w_name)
+                    if isinstance(layer, nn.Linear):
+                        setattr(block.mlp, w_name, LoRALinear(layer, rank=rank, alpha=alpha, dropout=dropout))
+                        injected_count += 1
 
     #calculate and display parameter statistics
     total_params = sum(p.numel() for p in model.parameters())
