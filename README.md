@@ -85,16 +85,24 @@ The installer scripts (`install_pc.bat`, `install_mac.sh`, `install_linux.sh`) a
 
 - **Hugging Face Model Repository**: [carnol16/timbral-transfer](https://huggingface.co/carnol16/timbral-transfer)
 - **Base Model Checkpoint**: `diT_best_val.pt` (~690 MB)
-- **Studio LoRA Suite**: 5 adapters (~2.3 MB each) under `lora/`
-  - `violin_song121_r8_best.pt` (Studio Violin)
-  - `flute_song56_r8_best.pt` (Concert Flute)
-  - `tenor_saxophone_song85_r8_best.pt` (Tenor Saxophone)
-  - `trumpet_song94_r8_best.pt` (Solo Trumpet)
-  - `clarinet_song201_r8_best.pt` (Solo Clarinet)
+- **Studio LoRA Suite**:
+  - **v2 High-Capacity ($r=32$, ~9.45 MB each)** under `checkpoints/lora_norm_v2/`:
+    - `violin_song121_r32_best.pt` (Studio Violin - wood resonance & expressive vibrato)
+    - `flute_song56_r32_best.pt` (Concert Flute - breath turbulence & pure tone)
+    - `tenor_saxophone_song85_r32_best.pt` (Tenor Saxophone - reed bite & harmonic lock)
+    - `trumpet_song94_r32_best.pt` (Solo Trumpet - brass attack flare & harmonic drive)
+    - `clarinet_song201_r32_best.pt` (Solo Clarinet - hollow cylindrical warmth)
+  - **v1 Compact ($r=8$, ~2.38 MB each)** under `checkpoints/lora/`
 
 ```text
 checkpoints/
 ├── diT_best_val.pt
+├── lora_norm_v2/
+│   ├── violin_song121_r32_best.pt
+│   ├── flute_song56_r32_best.pt
+│   ├── tenor_saxophone_song85_r32_best.pt
+│   ├── trumpet_song94_r32_best.pt
+│   └── clarinet_song201_r32_best.pt
 └── lora/
     ├── violin_song121_r8_best.pt
     ├── flute_song56_r8_best.pt

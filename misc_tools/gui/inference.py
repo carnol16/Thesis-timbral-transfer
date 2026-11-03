@@ -47,10 +47,7 @@ def get_curated_adapter_path(inst_id, version="v2"):
     if version == "v1":
         return name, rel_r8
     base_stem = os.path.basename(rel_r8).split("_r8")[0]
-    v2_rel = f"checkpoints/lora_norm_v2/{base_stem}_r32_best.pt"
-    if os.path.exists(os.path.join(PROJECT_ROOT, v2_rel)):
-        return name, v2_rel
-    return name, rel_r8
+    return name, f"checkpoints/lora_norm_v2/{base_stem}_r32_best.pt"
 
 # We use a separate venv for stable_audio to avoid library conflicts
 SA_VENV_DIR = os.path.join(PROJECT_ROOT, "sa_venv")
@@ -359,22 +356,50 @@ class InferenceEngine:
             if not os.path.exists(adapter_full):
                 print(f"[GUI] LoRA preset '{preset_name}' not found locally. Auto-downloading from Hugging Face...")
                 os.makedirs(os.path.dirname(adapter_full), exist_ok=True)
+                filename = os.path.basename(rel_path)
+                subfolder = "lora_norm_v2" if "lora_norm_v2" in rel_path else "lora"
+                download_success = False
                 try:
                     from huggingface_hub import hf_hub_download
-                    filename = os.path.basename(rel_path)
                     hf_hub_download(
                         repo_id="carnol16/timbral-transfer",
-                        subfolder="lora",
+                        subfolder=subfolder,
                         filename=filename,
                         local_dir=os.path.join(PROJECT_ROOT, "checkpoints"),
                     )
-                    cache_dir = os.path.join(PROJECT_ROOT, "checkpoints", ".cache")
-                    if os.path.exists(cache_dir):
-                        import shutil
-                        shutil.rmtree(cache_dir, ignore_errors=True)
-                    print(f"[GUI] Successfully downloaded {filename}!")
+                    download_success = True
                 except Exception as e:
-                    print(f"[GUI] Warning: Failed to download LoRA from Hugging Face: {e}")
+                    print(f"[GUI] Primary download from '{subfolder}' failed: {e}. Trying fallback 'lora/'...")
+                    try:
+                        from huggingface_hub import hf_hub_download
+                        hf_hub_download(
+                            repo_id="carnol16/timbral-transfer",
+                            subfolder="lora",
+                            filename=filename,
+                            local_dir=os.path.join(PROJECT_ROOT, "checkpoints"),
+                        )
+                        fallback_path = os.path.join(PROJECT_ROOT, "checkpoints", "lora", filename)
+                        if os.path.exists(fallback_path) and not os.path.exists(adapter_full):
+                            import shutil
+                            shutil.copy2(fallback_path, adapter_full)
+                        download_success = True
+                    except Exception as e2:
+                        print(f"[GUI] Warning: Failed to download LoRA from Hugging Face: {e2}")
+
+                cache_dir = os.path.join(PROJECT_ROOT, "checkpoints", ".cache")
+                if os.path.exists(cache_dir):
+                    import shutil
+                    shutil.rmtree(cache_dir, ignore_errors=True)
+
+                if download_success and os.path.exists(adapter_full):
+                    print(f"[GUI] Successfully downloaded {filename}!")
+                elif not os.path.exists(adapter_full):
+                    # Graceful local fallback to v1 if v2 was unavailable
+                    _, fallback_rel = get_curated_adapter_path(instrument_id, version="v1")
+                    fallback_full = os.path.join(PROJECT_ROOT, fallback_rel)
+                    if os.path.exists(fallback_full):
+                        print(f"[GUI] Notice: v2 adapter not found on disk; falling back to v1 adapter: {fallback_rel}")
+                        adapter_full = fallback_full
 
             print(f"[GUI] Applying Studio LoRA: {preset_name} [{os.path.basename(rel_path)}] (Strength: {lora_strength:.2f})")
             self.set_lora_adapter(adapter_full, strength=lora_strength)
