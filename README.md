@@ -9,7 +9,7 @@ The project is a standalone, cross-platform application for neural musical instr
 ## Features
 
 - **18 Musical Instrument Classes**: Transfer arbitrary melodic audio to acoustic piano, violin, cello, electric guitar, alto sax, clarinet, flute, brass, organ, and more.
-- **Curated Studio LoRA Suite**: Plug-and-play Low-Rank Adapters fine-tuned on uncompressed solo performer takes from Medley-solos-DB (Violin, Flute, Tenor Saxophone, Trumpet, Clarinet). Delivers wooden body resonance, bow scrape, breath air, and up to 50% intonation error reduction.
+- **Curated Studio LoRA Suite**: Plug-and-play Low-Rank Adapters fine-tuned on uncompressed solo performer takes from Medley-solos-DB (Violin, Flute, Alto Saxophone, Trumpet, Clarinet). Delivers wooden body resonance, bow scrape, breath air, and up to 50% intonation error reduction.
 - **Custom Artist LoRA Support**: Upload your own low-rank `.pt` weights directly into the web UI with adjustable intensity ($0.0 \to 1.5$).
 - **Intelligent Register Alignment**: Automatically transposes input pitch contours by integer octaves into the target instrument's natural playable register while proportionally scaling spectral centroids.
 - **Universal Hardware Support**:
