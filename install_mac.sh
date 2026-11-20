@@ -54,7 +54,7 @@ else
     exit 1
 fi
 
-echo "4/4: Checking and downloading model checkpoint (diT_best_val.pt)..."
+echo "4/4: Checking and downloading v3 model + Studio LoRA checkpoints..."
 source .venv/bin/activate
 python download_checkpoint.py
 deactivate

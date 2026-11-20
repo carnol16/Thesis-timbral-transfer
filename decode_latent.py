@@ -1,9 +1,15 @@
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 import os
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 HF_CACHE_DIR = os.path.join(PROJECT_ROOT, "hf_cache")
 os.makedirs(HF_CACHE_DIR, exist_ok=True)
 os.environ["HF_HOME"] = HF_CACHE_DIR
 os.environ["HF_HUB_CACHE"] = os.path.join(HF_CACHE_DIR, "hub")
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import glob
 import torch
@@ -25,12 +31,8 @@ if torch.cuda.is_available():
     torch.backends.cuda.enable_mem_efficient_sdp(False)
     torch.backends.cuda.enable_math_sdp(True)
 
-if torch.cuda.is_available():
-    DEVICE = 'cuda'
-elif torch.mps.is_available():
-    DEVICE = 'mps'
-else:
-    DEVICE = 'cpu'
+# Autoencoder decoder: CUDA for PC/Linux; CPU for Mac/MPS to prevent Metal MPSNDArray strided view selector crashes on macOS < 15
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
 def ensure_shape(tensor):
@@ -75,7 +77,7 @@ def chunked_decode(model, latent):
         in_start = max(0, out_start - overlap_frames)
         in_end = min(total_frames, out_end + overlap_frames)
         
-        chunk = latent[:, :, in_start:in_end]
+        chunk = latent[:, :, in_start:in_end].contiguous()
         
         with torch.no_grad():
             a_out = model.decode(chunk)

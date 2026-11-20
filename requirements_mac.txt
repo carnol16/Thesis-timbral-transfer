@@ -12,3 +12,4 @@ einops
 rotary-embedding-torch
 torchcodec
 huggingface_hub
+pandas

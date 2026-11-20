@@ -1,5 +1,10 @@
 """
-download_checkpoint.py - Helper to check and download diT_best_val.pt from Hugging Face.
+download_checkpoint.py - Download the v3 base model and v3 Studio LoRA adapters from Hugging Face.
+
+Every file lives at the same relative path in the HF repo as under checkpoints/ locally, so
+hf_hub_download(local_dir="checkpoints") places each one where the GUI expects it.
+The GUI also downloads any missing file on first use, so running this is optional but avoids
+a long pause the first time you click Generate.
 """
 import os
 import shutil
@@ -7,73 +12,51 @@ import sys
 
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 CKPT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
-CKPT_PATH = os.path.join(CKPT_DIR, "diT_best_val.pt")
 REPO_ID = "carnol16/timbral-transfer"
-FILENAME = "diT_best_val.pt"
 
-LORA_DIR = os.path.join(CKPT_DIR, "lora")
-LORA_FILES = [
-    "violin_song121_r8_best.pt",
-    "flute_song56_r8_best.pt",
-    "tenor_saxophone_song85_r8_best.pt",
-    "trumpet_song94_r8_best.pt",
-    "clarinet_song201_r8_best.pt",
+# (path in HF repo == path under checkpoints/, minimum valid size in bytes, label)
+FILES = [
+    ("v3/v3_final_ep57.pt", 100_000_000, "v3 base model (~690 MB)"),
+] + [
+    (f"lora_v3/{inst}_r8_all/adapter_best.pt", 100_000, f"{inst} Studio LoRA (~2.4 MB)")
+    for inst in ("violin", "flute", "clarinet", "trumpet", "tenor_saxophone")
 ]
 
+
 def main():
-    os.makedirs(CKPT_DIR, exist_ok=True)
-    os.makedirs(LORA_DIR, exist_ok=True)
-
-    # 1. Download Base Checkpoint
-    if os.path.exists(CKPT_PATH) and os.path.getsize(CKPT_PATH) > 100_000_000:
-        print(f"[OK] Base model checkpoint already exists at: {CKPT_PATH}")
-    else:
-        print(f"Downloading {FILENAME} (~690 MB) from Hugging Face ({REPO_ID})...")
-        try:
-            from huggingface_hub import hf_hub_download
-            hf_hub_download(
-                repo_id=REPO_ID,
-                filename=FILENAME,
-                local_dir=CKPT_DIR,
-            )
-            cache_dir = os.path.join(CKPT_DIR, ".cache")
-            if os.path.exists(cache_dir):
-                shutil.rmtree(cache_dir, ignore_errors=True)
-
-            if os.path.exists(CKPT_PATH) and os.path.getsize(CKPT_PATH) > 100_000_000:
-                print(f"[OK] Checkpoint downloaded successfully to: {CKPT_PATH}")
-            else:
-                raise RuntimeError("Download completed but base checkpoint is missing.")
-        except Exception as e:
-            print(f"\n[WARNING] Base checkpoint download failed: {e}")
-            print(f"Please manually download '{FILENAME}' from https://huggingface.co/{REPO_ID}")
-
-    # 2. Download Curated Studio LoRA Adapters
-    print(f"\nChecking Studio LoRA adapters in {LORA_DIR}...")
     from huggingface_hub import hf_hub_download
-    for lora_file in LORA_FILES:
-        target_path = os.path.join(LORA_DIR, lora_file)
-        if os.path.exists(target_path) and os.path.getsize(target_path) > 100_000:
-            print(f"  [OK] LoRA adapter present: {lora_file}")
+    os.makedirs(CKPT_DIR, exist_ok=True)
+    failed = []
+
+    for repo_path, min_size, label in FILES:
+        target = os.path.join(CKPT_DIR, *repo_path.split("/"))
+        if os.path.exists(target) and os.path.getsize(target) > min_size:
+            print(f"  [OK] {label} present: checkpoints/{repo_path}")
             continue
-
-        print(f"  Downloading LoRA {lora_file} (~2.3 MB) from Hugging Face...")
+        print(f"  Downloading {label} from Hugging Face ({REPO_ID}/{repo_path})...")
         try:
-            hf_hub_download(
-                repo_id=REPO_ID,
-                subfolder="lora",
-                filename=lora_file,
-                local_dir=CKPT_DIR,
-            )
-            cache_dir = os.path.join(CKPT_DIR, ".cache")
-            if os.path.exists(cache_dir):
-                shutil.rmtree(cache_dir, ignore_errors=True)
-            print(f"  [OK] Successfully downloaded {lora_file}")
+            hf_hub_download(repo_id=REPO_ID, filename=repo_path, local_dir=CKPT_DIR)
+            if not (os.path.exists(target) and os.path.getsize(target) > min_size):
+                raise RuntimeError("download finished but the file is missing or too small")
+            print(f"  [OK] Downloaded checkpoints/{repo_path}")
         except Exception as e:
-            print(f"  [WARNING] Could not download {lora_file}: {e}")
+            print(f"  [WARNING] Could not download {repo_path}: {e}")
+            failed.append(repo_path)
 
+    cache_dir = os.path.join(CKPT_DIR, ".cache")
+    if os.path.exists(cache_dir):
+        shutil.rmtree(cache_dir, ignore_errors=True)
+
+    if failed:
+        print(f"\n[WARNING] {len(failed)} file(s) failed. Download them manually from "
+              f"https://huggingface.co/{REPO_ID} into checkpoints/ (same folder layout):")
+        for f in failed:
+            print(f"  - {f}")
+        print("(The GUI will also retry missing files when it starts.)")
+        return 0   # don't abort the installers; the GUI downloads on demand
+    print("\n[OK] All v3 checkpoints are in place.")
     return 0
+
 
 if __name__ == "__main__":
     sys.exit(main())
-

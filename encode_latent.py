@@ -1,9 +1,15 @@
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+
 import os
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 HF_CACHE_DIR = os.path.join(PROJECT_ROOT, "hf_cache")
 os.makedirs(HF_CACHE_DIR, exist_ok=True)
 os.environ["HF_HOME"] = HF_CACHE_DIR
 os.environ["HF_HUB_CACHE"] = os.path.join(HF_CACHE_DIR, "hub")
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 os.environ["TORCH_COMPILE_DISABLE"] = "1"
 import torch
@@ -25,12 +31,8 @@ if torch.cuda.is_available():
     torch.backends.cuda.enable_math_sdp(True)
 
 
-if torch.cuda.is_available():
-    DEVICE = "cuda" 
-elif torch.mps.is_available():
-    DEVICE = "mps"
-else:
-    DEVICE = "cpu"
+# Autoencoder encoder: CUDA on PC/Linux; CPU on Mac/MPS to prevent Metal MPSNDArray strided view selector crashes on macOS < 15
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def load_mono(path):
@@ -91,7 +93,7 @@ def chunked_encode(model, audio_t, sample_rate=44100):
         in_start_sample = in_start * H
         in_end_sample = in_end * H
         
-        chunk = audio_t[:, :, in_start_sample:in_end_sample]
+        chunk = audio_t[:, :, in_start_sample:in_end_sample].contiguous()
         
         with torch.no_grad():
             l_out = model.encode(chunk, sample_rate)

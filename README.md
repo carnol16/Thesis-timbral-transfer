@@ -9,9 +9,13 @@ The project is a standalone, cross-platform application for neural musical instr
 ## Features
 
 - **18 Musical Instrument Classes**: Transfer arbitrary melodic audio to acoustic piano, violin, cello, electric guitar, alto sax, clarinet, flute, brass, organ, and more.
-- **Curated Studio LoRA Suite**: Plug-and-play Low-Rank Adapters fine-tuned on uncompressed solo performer takes from Medley-solos-DB (Violin, Flute, Alto Saxophone, Trumpet, Clarinet). Delivers wooden body resonance, bow scrape, breath air, and up to 50% intonation error reduction.
-- **Custom Artist LoRA Support**: Upload your own low-rank `.pt` weights directly into the web UI with adjustable intensity ($0.0 \to 1.5$).
-- **Intelligent Register Alignment**: Automatically transposes input pitch contours by integer octaves into the target instrument's natural playable register while proportionally scaling spectral centroids.
+- **v3 Pitch-Fixed Model (Nov 2026)**: 173M-parameter DiT retrained with Fourier pitch features and voiced-frame normalization, so the output follows the input melody far more closely than earlier versions.
+- **Curated Studio LoRA Suite**: Rank-8 adapters trained on every Medley-solos-DB training song of each instrument (3–24 real players): Violin, Flute, Clarinet, Trumpet, and Tenor Sax (applied to Alto Sax).
+- **Custom LoRA Support**: Upload your own `.pt` adapter (trained with `train_lora_v3.py` for the v3 base) with adjustable intensity ($0.0 \to 1.5$).
+- **Timbre Source Control**: Choose whether the target instrument alone decides the sound (recommended), the source's brightness changes are kept, or the source character is copied (like-to-like).
+- **Seamless Long Inputs**: Audio longer than ~3.7 s is rendered as overlapping windows that are kept in sync during sampling (MultiDiffusion), so there are no dips or timbre jumps at the joins.
+- **Intelligent Register Alignment**: Automatically transposes input pitch contours by whole octaves into the target instrument's playable register, preserving the key.
+- **Debug Plots**: Optional input/output spectrograms and contour overlays (pitch, voicing, RMS, onset, aperiodicity, centroid) with median pitch error in cents.
 - **Universal Hardware Support**:
   - **Windows & Linux**: Fully accelerated with NVIDIA CUDA (Flash / SDPA support).
   - **macOS**: Native acceleration via Apple Silicon Metal Performance Shaders (MPS).
@@ -84,34 +88,29 @@ Choose the setup instructions for your operating system:
 The installer scripts (`install_pc.bat`, `install_mac.sh`, `install_linux.sh`) and the application GUI automatically check for and download the required DiT model weights and Studio LoRA adapters from Hugging Face if they are not already present:
 
 - **Hugging Face Model Repository**: [carnol16/timbral-transfer](https://huggingface.co/carnol16/timbral-transfer)
-- **Base Model Checkpoint**: `diT_best_val.pt` (~690 MB)
-- **Studio LoRA Suite**:
-  - **v2 High-Capacity ($r=32$, ~9.45 MB each)** under `checkpoints/lora_norm_v2/`:
-    - `violin_song121_r32_best.pt` (Studio Violin - wood resonance & expressive vibrato)
-    - `flute_song56_r32_best.pt` (Concert Flute - breath turbulence & pure tone)
-    - `tenor_saxophone_song85_r32_best.pt` (Tenor Saxophone - reed bite & harmonic lock)
-    - `trumpet_song94_r32_best.pt` (Solo Trumpet - brass attack flare & harmonic drive)
-    - `clarinet_song201_r32_best.pt` (Solo Clarinet - hollow cylindrical warmth)
-  - **v1 Compact ($r=8$, ~2.38 MB each)** under `checkpoints/lora/`
+- **Base Model Checkpoint**: `v3/v3_final_ep57.pt` (~690 MB)
+- **Studio LoRA Suite** (rank 8, ~2.4 MB each) under `lora_v3/`:
+  - `violin_r8_all/adapter_best.pt` (Studio Violin, 24 players)
+  - `flute_r8_all/adapter_best.pt` (Concert Flute, 17 players)
+  - `clarinet_r8_all/adapter_best.pt` (Clarinet, 13 players)
+  - `trumpet_r8_all/adapter_best.pt` (Solo Trumpet, 24 players)
+  - `tenor_saxophone_r8_all/adapter_best.pt` (Tenor Sax, used for Alto Sax, 3 players)
+
+You can also fetch everything ahead of time with `python download_checkpoint.py`.
 
 ```text
 checkpoints/
-├── diT_best_val.pt
-├── lora_norm_v2/
-│   ├── violin_song121_r32_best.pt
-│   ├── flute_song56_r32_best.pt
-│   ├── tenor_saxophone_song85_r32_best.pt
-│   ├── trumpet_song94_r32_best.pt
-│   └── clarinet_song201_r32_best.pt
-└── lora/
-    ├── violin_song121_r8_best.pt
-    ├── flute_song56_r8_best.pt
-    ├── tenor_saxophone_song85_r8_best.pt
-    ├── trumpet_song94_r8_best.pt
-    └── clarinet_song201_r8_best.pt
+├── v3/
+│   └── v3_final_ep57.pt
+└── lora_v3/
+    ├── violin_r8_all/adapter_best.pt
+    ├── flute_r8_all/adapter_best.pt
+    ├── clarinet_r8_all/adapter_best.pt
+    ├── trumpet_r8_all/adapter_best.pt
+    └── tenor_saxophone_r8_all/adapter_best.pt
 ```
 
-*(If you ever need to download them manually or offline, download the files directly from [https://huggingface.co/carnol16/timbral-transfer](https://huggingface.co/carnol16/timbral-transfer) and place them into their respective `checkpoints/` and `checkpoints/lora/` directories).*
+*(To download manually or offline, get the files from [https://huggingface.co/carnol16/timbral-transfer](https://huggingface.co/carnol16/timbral-transfer) and place them under `checkpoints/` using the same folder layout as on Hugging Face.)*
 
 ---
 
@@ -135,10 +134,13 @@ Once launched, open the local URL in your web browser (typically `http://127.0.0
 
 1. **Upload Audio**: Drag and drop any clean, monophonic or solo audio file (vocals, whistling, violin, flute, guitar, etc.) or choose one of the samples from `external_test_audio/`.
 2. **Select Target Instrument**: Choose from the 18 Slakh instrument classes.
-3. **Configure Settings**:
-   - **DDIM Steps**: `50`–`100` steps for optimal quality vs. speed.
-   - **CFG Scale**: `3.0`–`5.0` controls how strictly the model adheres to the pitch contour conditioning.
-4. **Generate**: Click **Transfer Timbre** and listen to the result!
+3. **Configure Settings** (choosing an instrument loads its tuned preset):
+   - **Timbre Source**: leave on *Target instrument only* unless you are doing like-to-like transfer.
+   - **Contour CFG / Instrument Prior CFG**: melody lock vs. pull toward the instrument's tone.
+   - **Studio LoRA**: on by default for Violin, Flute, Clarinet, Trumpet, and Alto Sax.
+   - **Diffusion Steps**: `25` fast preview, `50` recommended, `100` highest quality.
+   - **Generate Debug Plots**: tick to see spectrograms and contour comparisons under *Debug Plots*.
+4. **Generate**: Click **Generate Transfer** and listen to the result!
 
 ---
 
@@ -147,13 +149,20 @@ Once launched, open the local URL in your web browser (typically `http://127.0.0
 ```text
 universal_deployable/
 ├── artifacts/
-│   └── norm_stats.npz          # Latent & contour normalization statistics
-├── checkpoints/
-│   └── diT_best_val.pt         # Slakh18 114M DiT checkpoint
+│   └── slakh_v3/
+│       └── timbre_feature_stats.npz  # Per-instrument timbre stats (Timbre Source modes)
+├── checkpoints/                # Downloaded from Hugging Face (see above)
+│   ├── v3/v3_final_ep57.pt     # v3 173M DiT (normalization stats stored inside)
+│   └── lora_v3/                # v3 Studio LoRA adapters
+├── data/
+│   ├── contour.py              # CREPE pitch + contour extraction
+│   ├── pitch_screen_dataset.py # v3 contour normalization
+│   └── timbre_features.py      # Timbre Source modes
 ├── external_test_audio/        # Ready-to-use sample clips for testing
 ├── hf_cache/                   # Self-contained Hugging Face cache
 ├── models/
-│   └── dit_modified.py         # Modified Diffusion Transformer definition
+│   ├── dit_modified.py         # Modified Diffusion Transformer definition
+│   └── lora.py                 # LoRA injection / loading
 ├── misc_tools/
 │   └── gui/
 │       ├── app.py              # Gradio web interface definition
@@ -161,6 +170,7 @@ universal_deployable/
 ├── run_app.py                  # Main application entry point
 ├── encode_latent.py            # Latent encoding script (sa_venv)
 ├── decode_latent.py            # Latent decoding script (sa_venv)
+├── download_checkpoint.py      # Fetches v3 weights + LoRAs from Hugging Face
 ├── stable-audio-3/             # Stability AI Stable Audio repo (auto-cloned during install)
 ├── install_pc.bat              # Windows setup script
 ├── install_mac.sh              # macOS setup script

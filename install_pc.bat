@@ -88,7 +88,7 @@ pip install --no-deps -e stable-audio-3
 call sa_venv\Scripts\deactivate.bat
 
 echo.
-echo 4/4: Checking and downloading model checkpoint (diT_best_val.pt)...
+echo 4/4: Checking and downloading v3 model + Studio LoRA checkpoints...
 call .venv\Scripts\activate.bat
 python download_checkpoint.py
 call .venv\Scripts\deactivate.bat

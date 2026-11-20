@@ -12,3 +12,4 @@ einops
 rotary-embedding-torch
 huggingface_hub
 soundfile
+pandas

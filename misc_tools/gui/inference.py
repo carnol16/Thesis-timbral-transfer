@@ -19,35 +19,105 @@ os.chdir(PROJECT_ROOT)   # all relative artifact paths resolve from here
 
 from models.dit_modified import ContourRendererDiT as ModifiedDiT
 from models.lora import inject_lora, load_lora_weights, LoRALinear
-from data.contour import extract_contours
+from data.contour import extract_contours, fill_unvoiced
+from data.pitch_screen_dataset import normalize_contour
+from data.timbre_features import retarget_raw, apply_mode_normalized, TIMBRE_MODES
 
-# Curated Factory LoRA Adapters (Instrument ID -> Name, Relative Path)
-LORA_ADAPTER_MAP = {
-    17: ("Studio Violin (Medley Soloist)", "checkpoints/lora/violin_song121_r8_best.pt"),
-    12: ("Concert Flute (Medley Soloist)", "checkpoints/lora/flute_song56_r8_best.pt"),
-    3:  ("Alto Saxophone", "checkpoints/lora/tenor_saxophone_song85_r8_best.pt"),
-    16: ("Solo Trumpet (Medley Soloist)", "checkpoints/lora/trumpet_song94_r8_best.pt"),
-    7:  ("Clarinet (Medley Soloist)", "checkpoints/lora/clarinet_song201_r8_best.pt"),
+# Hugging Face repo hosting the weights. Each local path below mirrors its path in the repo under
+# checkpoints/, so hf_hub_download(local_dir="checkpoints") lands files exactly where they are expected.
+HF_REPO_ID = "carnol16/timbral-transfer"
+
+# v3 base model: stores its own recipe + normalization stats in the checkpoint.
+BASE_MODELS = {
+    "v3 Pitch-Fixed (Nov 2026)": "checkpoints/v3/v3_final_ep57.pt",
+}
+DEFAULT_BASE = "v3 Pitch-Fixed (Nov 2026)"
+
+
+def ensure_checkpoint(rel_path):
+    """Return the absolute path of a checkpoint, downloading it from Hugging Face if missing.
+    rel_path must start with 'checkpoints/'; the rest is its path in HF_REPO_ID."""
+    full = os.path.join(PROJECT_ROOT, rel_path)
+    if os.path.exists(full):
+        return full
+    repo_path = os.path.relpath(rel_path, "checkpoints").replace(os.sep, "/")
+    print(f"[GUI] {rel_path} not found locally. Downloading from Hugging Face ({HF_REPO_ID}/{repo_path})...")
+    from huggingface_hub import hf_hub_download
+    hf_hub_download(repo_id=HF_REPO_ID, filename=repo_path,
+                    local_dir=os.path.join(PROJECT_ROOT, "checkpoints"))
+    cache_dir = os.path.join(PROJECT_ROOT, "checkpoints", ".cache")
+    if os.path.exists(cache_dir):
+        import shutil
+        shutil.rmtree(cache_dir, ignore_errors=True)
+    print(f"[GUI] Downloaded {os.path.basename(rel_path)}")
+    return full
+# v3 CFG default: cfg_inst_scale == cfg_scale reduces the two-factor CFG to plain
+# v_null + s * (v_full - v_null), the setting the pitch harness validated (s = 3.0)
+V3_DEFAULT_CFG = 3.0
+# Timbre source (v3 only), see data/timbre_features.py and evaluation/timbre_source_eval.py.
+# Default "instrument": the source's aperiodicity + centroid are dropped (the state channel dropout
+# trained), so the chosen instrument decides the timbre. Chosen by LISTENING (Nov 11 2026: preferred in
+# 4 of 4 picked cases, incl. sax -> Alto Sax that sounded string-like). The spectral metric favoured
+# "retarget" (cross target rank 6.95 source / 6.04 drop / 4.60 retarget), but it partly measures the
+# brightness that retarget sets directly, so the listening result wins.
+DEFAULT_TIMBRE_MODE = "instrument"
+# Window blending for inputs longer than one window (> 40 frames, ~3.7 s).
+#   "synced"  : MultiDiffusion (Bar-Tal et al. 2023): one shared full-length latent; the overlapping windows
+#               are averaged after EVERY DDIM step, so neighbours agree while they are being denoised.
+#   "standard": every window gets its own noise and runs all steps alone; the finished latents are
+#               overlap-added once at the end (the original GUI behaviour).
+# Nov 12 2026 (evaluation/window_blend_test.py, 47 same-instrument + 67 cross-instrument renders):
+# standard leaves the overlap zones ~1.5 dB quieter and duller (latent norm 0.90 of the window interiors)
+# and lets the target instrument drift more between windows; synced removes both at the same speed, pitch
+# unchanged. Blind listening: cross-instrument 7-3 for synced, same-instrument 5-1 for standard (neither
+# significant). Synced is the default because cross-instrument transfer is the main use case.
+BLEND_MODES = ("synced", "standard")
+DEFAULT_BLEND_MODE = "synced"
+# Per-instrument v3 presets (contour CFG, instrument CFG).
+# Nov 10 2026: first sweep (cfg_preset_sweep.py) + A/B/C listening, under the old defaults
+#   (timbre source "keep source", no LoRA): clarinet 2/2 won by ear; alto sax, flute, trumpet kept 3/3.
+# Nov 11 2026: re-sweep under the CURRENT defaults (timbre source "target only", Studio LoRA on):
+#   evaluation/cfg_sweep_v3_defaults.py. With aperiodicity/centroid dropped, the instrument label
+#   carries the timbre, so a stronger instrument CFG now clearly helps (timbre distance to the Slakh
+#   class, paired over 12 clips, better on 10-12/12 clips, pitch follow within -0.03).
+#   Violin: 1.5/1.5 was its weakest pitch setting (follow 0.94, 1.7% octave errors) -> 3/3 (0.99,
+#   same timbre). Flute, clarinet, trumpet: changes within noise, kept. Not yet confirmed by ear.
+V3_PRESETS = {
+    17: (3.0, 3.0),   # Violin           (was 1.5/1.5; follow 0.94 -> 0.99)
+    7:  (2.0, 2.0),   # Clarinet         (kept, by ear)
+    1:  (3.0, 4.5),   # Grand Piano      timbre -2.55 +- 0.43 (voicing 0.87: chordal)
+    4:  (4.0, 6.0),   # Brass Section    timbre -2.43 +- 0.46
+    11: (4.0, 6.0),   # Electric Piano   timbre -1.82 +- 0.34
+    8:  (4.0, 6.0),   # Distortion Guit. timbre -1.34 +- 0.25
+    2:  (4.0, 6.0),   # Acoustic Guitar  timbre -1.32 +- 0.29
+    9:  (3.0, 4.5),   # Electric Bass    timbre -0.99 +- 0.30
+    3:  (3.0, 4.5),   # Alto Sax (LoRA)  real-player timbre -0.77 +- 0.25
+    6:  (3.0, 4.5),   # Choir Aahs       timbre -0.77 +- 0.29
+}
+# v3 Studio LoRA strength per instrument (default 1.0). Violin LoRA lost 2 blind cross-instrument
+# A/Bs at 1.0; at 0.8 its class rank improves (2.6 -> 2.0) at the same pitch (re-sweep, Nov 11).
+V3_LORA_STRENGTH = {17: 0.8}
+
+
+# v3 Studio LoRAs (Nov 10 2026): rank 8, trained on ALL train-fold (0-2) Medley songs of each
+# instrument with train_lora_v3.py; scored on fold 3 with evaluation/lora_eval_v3.py
+# (timbre vs the real recording 11-21% closer, pitch unchanged within +-0.02).
+V3_LORA_MAP = {
+    17: ("Studio Violin (Medley, 24 players)", "checkpoints/lora_v3/violin_r8_all/adapter_best.pt"),
+    12: ("Concert Flute (Medley, 17 players)", "checkpoints/lora_v3/flute_r8_all/adapter_best.pt"),
+    7:  ("Clarinet (Medley, 13 players)", "checkpoints/lora_v3/clarinet_r8_all/adapter_best.pt"),
+    16: ("Solo Trumpet (Medley, 24 players)", "checkpoints/lora_v3/trumpet_r8_all/adapter_best.pt"),
+    3:  ("Tenor Sax on Alto Sax (Medley, 3 players)", "checkpoints/lora_v3/tenor_saxophone_r8_all/adapter_best.pt"),
 }
 
-# Empirical Sweet Spots per Instrument (from 3D Sweep across CFG, LoRA, and Inst Guidance)
-INSTRUMENT_OPTIMAL_PRESETS = {
-    17: {"cfg_scale": 3.5, "lora_strength": 1.00, "cfg_inst_scale": 1.8}, # Studio Violin (Wood resonance & smooth vibrato)
-    7:  {"cfg_scale": 3.0, "lora_strength": 1.20, "cfg_inst_scale": 1.8}, # Solo Clarinet (Hollow cylindrical woodwind, odd harmonics)
-    12: {"cfg_scale": 3.0, "lora_strength": 1.00, "cfg_inst_scale": 1.0}, # Concert Flute (Airy breath turbulence, pure sinusoidal)
-    3:  {"cfg_scale": 4.5, "lora_strength": 0.80, "cfg_inst_scale": 1.8}, # Alto / Tenor Saxophone (Reed bite & tight harmonic lock)
-    16: {"cfg_scale": 3.5, "lora_strength": 1.20, "cfg_inst_scale": 1.8}, # Solo Trumpet (Brassy harmonic drive & attack flare)
-}
 
-def get_curated_adapter_path(inst_id, version="v2"):
-    """Returns curated adapter path for the requested version ('v2' or 'v1')."""
-    if inst_id not in LORA_ADAPTER_MAP:
-        return None, None
-    name, rel_r8 = LORA_ADAPTER_MAP[inst_id]
-    if version == "v1":
-        return name, rel_r8
-    base_stem = os.path.basename(rel_r8).split("_r8")[0]
-    return name, f"checkpoints/lora_norm_v2/{base_stem}_r32_best.pt"
+def v3_preset(instrument_id):
+    """(contour CFG, instrument CFG) for the v3 model."""
+    return V3_PRESETS.get(instrument_id, (V3_DEFAULT_CFG, V3_DEFAULT_CFG))
+
+
+def v3_lora_strength(instrument_id):
+    return V3_LORA_STRENGTH.get(instrument_id, 1.0)
 
 # We use a separate venv for stable_audio to avoid library conflicts
 SA_VENV_DIR = os.path.join(PROJECT_ROOT, "sa_venv")
@@ -125,48 +195,65 @@ class InferenceEngine:
         self._load_models()
 
     def _load_models(self):
-        print("[GUI] Loading Phase 5 Modified DiT (Slakh18 114M)...")
-        self.dit_model = ModifiedDiT(
-            contour_dim=6, d_model=768, depth=16, n_heads=12,
-            use_rope=True, use_instrument_embed=True, num_instruments=18,
-        ).to(DEVICE)
+        self.base_name = None
+        self.load_base(DEFAULT_BASE)
 
-        ckpt = os.path.join(
-            PROJECT_ROOT,
-            "checkpoints/Slakh18/DiT_modern/ablation_both_multi_inst_large/diT_best_val.pt"
-        )
-        if not os.path.exists(ckpt):
-            alt_ckpt = os.path.join(PROJECT_ROOT, "checkpoints/diT_best_val.pt")
-            if os.path.exists(alt_ckpt):
-                ckpt = alt_ckpt
-        checkpoint = torch.load(ckpt, weights_only=False, map_location=DEVICE)
-        state_dict = {k.removeprefix("_orig_mod."): v for k, v in checkpoint.items()}
-        self.dit_model.load_state_dict(state_dict)
-        self.dit_model.eval()
+    def load_base(self, name):
+        """Load a base model by its BASE_MODELS name. No-op if it is already loaded."""
+        if name == self.base_name:
+            return
+        if name not in BASE_MODELS:
+            raise ValueError(f"Unknown base model {name!r}; choose from {list(BASE_MODELS)}")
+        path = ensure_checkpoint(BASE_MODELS[name])
+        print(f"[GUI] Loading base model: {name} ({os.path.basename(path)})")
+        if getattr(self, "dit_model", None) is not None:    # free the previous model first
+            del self.dit_model
+            gc.collect(); torch.cuda.empty_cache()
+        ckpt = torch.load(path, weights_only=False, map_location="cpu")
 
-        # Inject LoRA architecture
-        print("[GUI] Initializing LoRA adapter architecture...")
-        self.dit_model = inject_lora(self.dit_model, rank=8, alpha=16.0)
-        self.dit_model = self.dit_model.to(DEVICE)
+        if not (isinstance(ckpt, dict) and "ema" in ckpt):
+            raise ValueError(f"{path} is not a v3 checkpoint (no 'ema' key); this build only runs v3.")
+        # v3: size, stats and contour recipe all live in the checkpoint
+        mc = ckpt["model_config"]
+        weights, contour_dim = ckpt["ema"], ckpt["contour_dim"]
+        self.recipe = dict(kind="v3", channels=list(ckpt["channels"]), fill=bool(ckpt["fill_unvoiced"]),
+                           fourier=bool(ckpt["fourier"]), periods=tuple(ckpt["fourier_periods"]))
+        v3_stats = {k: ckpt[k] for k in ("latent_mean", "latent_std", "contour_mean", "contour_std")}
+
+        model = ModifiedDiT(contour_dim=contour_dim, d_model=mc["d_model"], depth=mc["depth"],
+                            n_heads=mc["n_heads"], use_rope=mc["use_rope"],
+                            use_instrument_embed=mc["use_instrument_embed"],
+                            num_instruments=mc["num_instruments"])
+        model.load_state_dict(weights)
+        self.dit_model = model.to(DEVICE).eval()
+        del ckpt, weights
+        gc.collect(); torch.cuda.empty_cache()
+
+        # LoRA architecture (rank 8; set_lora_adapter re-injects if an adapter differs). Adapters: V3_LORA_MAP.
         self.current_lora_adapter = None
+        print("[GUI] Initializing LoRA adapter architecture...")
+        self.dit_model = inject_lora(self.dit_model, rank=8, alpha=16.0).to(DEVICE)
         self.current_rank = 8
         self.current_target_mods = ["qkv", "proj"]
         self.set_lora_adapter(None, strength=0.0)
+        self.latent_mean = np.asarray(v3_stats["latent_mean"])[:, None].astype("float32")    # (256, 1)
+        self.latent_std = np.asarray(v3_stats["latent_std"])[:, None].astype("float32")
+        self.contour_mean = np.asarray(v3_stats["contour_mean"])[:, None].astype("float32")  # (9, 1): all raw channels
+        self.contour_std = np.asarray(v3_stats["contour_std"])[:, None].astype("float32")
+        self.base_name = name
+        n_params = sum(p.numel() for p in self.dit_model.parameters()) / 1e6
+        print(f"[GUI] Ready: {name} | {n_params:.1f}M params | recipe {self.recipe}")
 
-        print("[GUI] Loading normalization stats...")
-        self.update_norm_stats(use_clean=False)
-        print("[GUI] DiT model ready with LoRA support! (Autoencoder runs in subprocess via sa_venv)")
-
-    def update_norm_stats(self, use_clean=True):
-        """Loads clean stats for LoRAs, or legacy stats for unadapted base model."""
-        clean_p = os.path.join(PROJECT_ROOT, "artifacts/norm_stats.npz")
-        legacy_p = os.path.join(PROJECT_ROOT, "artifacts/norm_stats_legacy_v1.npz")
-        target_p = clean_p if (use_clean or not os.path.exists(legacy_p)) else legacy_p
-        stats = np.load(target_p)
-        self.latent_mean = stats["latent_mean"][:, None].astype("float32")   # (256,1)
-        self.latent_std  = stats["latent_std"][:, None].astype("float32")
-        self.contour_mean = stats["contour_mean"][:6, None].astype("float32") # (6,1)
-        self.contour_std  = stats["contour_std"][:6, None].astype("float32")
+    def normalize_for_model(self, contour_raw, timbre_mode="source", instrument_id=None):
+        """Raw (9, T) contour from extract_contours -> normalized (C, T) model input:
+        the exact v3 training transform (voiced stats, unvoiced fill, Fourier pitch) + its channels."""
+        r = self.recipe
+        if timbre_mode == "retarget" and instrument_id is not None:
+            contour_raw = retarget_raw(contour_raw, instrument_id)
+        full = normalize_contour(contour_raw, self.contour_mean, self.contour_std,
+                                 r["fill"], r["fourier"], r["periods"])
+        # aperiodicity + centroid sit at positions 4, 5 of v3's channel list [0..5, 9..16]
+        return apply_mode_normalized(full[r["channels"]], timbre_mode)
 
     def set_lora_adapter(self, adapter_path=None, strength=1.0):
         """Dynamically load or scale LoRA adapter weights, auto-adapting rank & targets."""
@@ -210,6 +297,7 @@ class InferenceEngine:
         cmd = [SA_PYTHON, "encode_latent.py", "--audio", audio_path, "--out", latent_path]
         env = os.environ.copy()
         env["TORCH_COMPILE_DISABLE"] = "1"
+        env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
         hf_cache_dir = os.path.join(PROJECT_ROOT, "hf_cache")
         os.makedirs(hf_cache_dir, exist_ok=True)
         env["HF_HOME"] = hf_cache_dir
@@ -247,6 +335,7 @@ class InferenceEngine:
         cmd = [SA_PYTHON, "decode_latent.py", "--latent", in_latent_path, "--out", out_audio_path]
         env = os.environ.copy()
         env["TORCH_COMPILE_DISABLE"] = "1"
+        env["PYTORCH_ENABLE_MPS_FALLBACK"] = "1"
         hf_cache_dir = os.path.join(PROJECT_ROOT, "hf_cache")
         os.makedirs(hf_cache_dir, exist_ok=True)
         env["HF_HOME"] = hf_cache_dir
@@ -268,48 +357,81 @@ class InferenceEngine:
         # torchaudio loads as (channels, frames). Gradio expects (frames, channels)
         return audio.T.numpy().astype("float32")
 
+    def _guided_v(self, x, t, cond_contour, inst_t, cfg_scale, cfg_inst_scale):
+        """Decoupled two-factor CFG velocity, shared by both samplers."""
+        # 1. Full prediction: conditioned on both contour and instrument
+        v_full = self.dit_model(x, t, cond_contour, instrument_id=inst_t)
+        if cfg_scale > 1.0 or cfg_inst_scale > 1.0:
+            zero_contour = torch.zeros_like(cond_contour)
+            # 2. Contour-unconditioned prediction: conditioned on instrument only
+            v_inst = self.dit_model(x, t, zero_contour, instrument_id=inst_t)
+            delta_contour = v_full - v_inst
+            if cfg_inst_scale > 1.0:
+                # 3. Null prediction: unconditioned on both contour and instrument
+                v_null = self.dit_model(x, t, zero_contour, instrument_id=None)
+                delta_inst = v_inst - v_null
+                # Independently amplify instrument timbre and melody contour
+                return v_null + cfg_inst_scale * delta_inst + cfg_scale * delta_contour
+            return v_inst + cfg_scale * delta_contour
+        return v_full
+
+    @staticmethod
+    def _ddim_step(x, v_pred, a_bar, prev_a_bar):
+        x_0 = torch.sqrt(a_bar) * x - torch.sqrt(1.0 - a_bar) * v_pred
+        eps = torch.sqrt(a_bar) * v_pred + torch.sqrt(1.0 - a_bar) * x
+        return torch.sqrt(prev_a_bar) * x_0 + torch.sqrt(1.0 - prev_a_bar) * eps
+
     def _ddim_loop(self, cond_contour, instrument_id, cfg_scale, ddim_steps, progress_cb, cfg_inst_scale=1.8):
+        """Independent sampling of a batch of windows (also the single-pass path)."""
         B, seq_len, C = cond_contour.shape
         x = torch.randn(B, seq_len, 256, device=DEVICE)
         acp = ALPHAS_CUMPROD.to(DEVICE)
         timesteps = torch.linspace(999, 0, ddim_steps, dtype=torch.long, device=DEVICE)
         inst_t = torch.full((B,), instrument_id, dtype=torch.long, device=DEVICE)
-        zero_contour = torch.zeros_like(cond_contour)
 
         with torch.no_grad():
             for i in range(ddim_steps):
                 t_step = timesteps[i].item()
                 t = torch.full((B,), t_step, device=DEVICE, dtype=torch.long)
-
-                # Decoupled Two-Factor CFG:
-                # 1. Full prediction: conditioned on both contour and instrument
-                v_full = self.dit_model(x, t, cond_contour, instrument_id=inst_t)
-
-                if cfg_scale > 1.0 or cfg_inst_scale > 1.0:
-                    # 2. Contour-unconditioned prediction: conditioned on instrument only
-                    v_inst = self.dit_model(x, t, zero_contour, instrument_id=inst_t)
-                    delta_contour = v_full - v_inst
-
-                    if cfg_inst_scale > 1.0:
-                        # 3. Null prediction: unconditioned on both contour and instrument
-                        v_null = self.dit_model(x, t, zero_contour, instrument_id=None)
-                        delta_inst = v_inst - v_null
-                        # Independently amplify instrument timbre and melody contour
-                        v_pred = v_null + cfg_inst_scale * delta_inst + cfg_scale * delta_contour
-                    else:
-                        v_pred = v_inst + cfg_scale * delta_contour
-                else:
-                    v_pred = v_full
-
-                a_bar = acp[t_step]
+                v_pred = self._guided_v(x, t, cond_contour, inst_t, cfg_scale, cfg_inst_scale)
                 prev_a_bar = torch.tensor(1.0, device=DEVICE) if i == ddim_steps - 1 else acp[timesteps[i+1].item()]
-                x_0 = torch.sqrt(a_bar) * x - torch.sqrt(1.0 - a_bar) * v_pred
-                eps = torch.sqrt(a_bar) * v_pred + torch.sqrt(1.0 - a_bar) * x
-                x   = torch.sqrt(prev_a_bar) * x_0 + torch.sqrt(1.0 - prev_a_bar) * eps
-
+                x = self._ddim_step(x, v_pred, acp[t_step], prev_a_bar)
                 if progress_cb:
                     progress_cb(i + 1, ddim_steps)
         return x
+
+    def _ddim_loop_synced(self, cond_full, windows, weights, instrument_id, cfg_scale, ddim_steps, progress_cb,
+                          cfg_inst_scale=1.8):
+        """MultiDiffusion: one full-length latent; after every DDIM step the windows are written back with
+        their Hann weights and averaged, so overlapping windows continue from the same values.
+        cond_full (1, T, C); windows [(start, end)] of equal length; weights [np (W,)]. Returns (1, T, 256)."""
+        T = cond_full.shape[1]
+        nw = len(windows)
+        cond_w = torch.cat([cond_full[:, st:en] for st, en in windows], dim=0)          # (nw, W, C)
+        w_t = [torch.from_numpy(w).to(DEVICE)[None, :, None] for w in weights]
+        acc = torch.zeros(1, T, 1, device=DEVICE)
+        for (st, en), w in zip(windows, w_t):
+            acc[:, st:en] += w
+        acp = ALPHAS_CUMPROD.to(DEVICE)
+        timesteps = torch.linspace(999, 0, ddim_steps, dtype=torch.long, device=DEVICE)
+        inst_t = torch.full((nw,), instrument_id, dtype=torch.long, device=DEVICE)
+        x_full = torch.randn(1, T, 256, device=DEVICE)                                  # ONE noise tensor
+
+        with torch.no_grad():
+            for i in range(ddim_steps):
+                t_step = timesteps[i].item()
+                t = torch.full((nw,), t_step, device=DEVICE, dtype=torch.long)
+                x = torch.cat([x_full[:, st:en] for st, en in windows], dim=0)
+                v_pred = self._guided_v(x, t, cond_w, inst_t, cfg_scale, cfg_inst_scale)
+                prev_a_bar = torch.tensor(1.0, device=DEVICE) if i == ddim_steps - 1 else acp[timesteps[i+1].item()]
+                x = self._ddim_step(x, v_pred, acp[t_step], prev_a_bar)
+                x_full = torch.zeros_like(x_full)
+                for k, (st, en) in enumerate(windows):
+                    x_full[:, st:en] += x[k:k+1] * w_t[k]
+                x_full = x_full / (acc + 1e-8)
+                if progress_cb:
+                    progress_cb(i + 1, ddim_steps)
+        return x_full
 
     @staticmethod
     def _generate_window_weights(window_len, overlap_left, overlap_right):
@@ -325,92 +447,46 @@ class InferenceEngine:
 
     def run_timbre_transfer(self, audio_path, instrument_id=17, cfg_scale=None,
                             ddim_steps=50, octave_shift=0, use_lora=True,
-                            lora_strength=None, lora_version="v2 High-Capacity (r=32)", custom_lora_path=None, progress_cb=None,
-                            cfg_inst_scale=None, force_clean_norm=None, match_source_loudness=True):
-        # Auto-apply instrument-specific optimal preset defaults if not explicitly passed
-        opt = INSTRUMENT_OPTIMAL_PRESETS.get(instrument_id, {})
+                            lora_strength=None, custom_lora_path=None, progress_cb=None,
+                            cfg_inst_scale=None, match_source_loudness=True,
+                            snap_to_semitones=False, timbre_mode=None, blend_mode=None):
+        if blend_mode is None:
+            blend_mode = DEFAULT_BLEND_MODE
+        if blend_mode not in BLEND_MODES:
+            raise ValueError(f"blend_mode must be one of {BLEND_MODES}")
+        if timbre_mode is None:
+            timbre_mode = DEFAULT_TIMBRE_MODE
+        if timbre_mode not in TIMBRE_MODES:
+            raise ValueError(f"timbre_mode must be one of {TIMBRE_MODES}")
+        print(f"[GUI] Timbre source: {timbre_mode}")
+        # Per-instrument v3 presets fill in anything not passed explicitly
+        p_con, p_inst = v3_preset(instrument_id)
         if cfg_scale is None:
-            cfg_scale = opt.get("cfg_scale", 3.5)
-        if lora_strength is None:
-            lora_strength = opt.get("lora_strength", 1.00)
+            cfg_scale = p_con
         if cfg_inst_scale is None:
-            cfg_inst_scale = opt.get("cfg_inst_scale", 1.8)
+            cfg_inst_scale = p_inst
+        if lora_strength is None:
+            lora_strength = v3_lora_strength(instrument_id)
 
         print(f"[GUI] Loading: {audio_path}")
 
-        # Configure LoRA Adapter and dynamic normalization routing
-        is_lora_active = False
-        use_clean_norm = False
+        # Configure LoRA adapter: v3 adapters only (V3_LORA_MAP / train_lora_v3.py)
         if custom_lora_path and os.path.exists(custom_lora_path):
-            print(f"[GUI] Applying Custom Artist LoRA: {os.path.basename(custom_lora_path)} (Strength: {lora_strength:.2f})")
+            print(f"[GUI] Applying Custom LoRA: {os.path.basename(custom_lora_path)} (Strength: {lora_strength:.2f}). "
+                  "Must be trained with train_lora_v3.py for the v3 base.")
             self.set_lora_adapter(custom_lora_path, strength=lora_strength)
-            is_lora_active = True
-            use_clean_norm = False if force_clean_norm is None else force_clean_norm
-        elif use_lora and instrument_id in LORA_ADAPTER_MAP:
-            ver = "v1" if (lora_version and "v1" in str(lora_version).lower()) else "v2"
-            preset_name, rel_path = get_curated_adapter_path(instrument_id, version=ver)
-            adapter_full = os.path.join(PROJECT_ROOT, rel_path)
-            use_clean_norm = False if force_clean_norm is None else force_clean_norm
-
-            # Auto-download on-the-fly from Hugging Face if not found locally
-            if not os.path.exists(adapter_full):
-                print(f"[GUI] LoRA preset '{preset_name}' not found locally. Auto-downloading from Hugging Face...")
-                os.makedirs(os.path.dirname(adapter_full), exist_ok=True)
-                filename = os.path.basename(rel_path)
-                subfolder = "lora_norm_v2" if "lora_norm_v2" in rel_path else "lora"
-                download_success = False
-                try:
-                    from huggingface_hub import hf_hub_download
-                    hf_hub_download(
-                        repo_id="carnol16/timbral-transfer",
-                        subfolder=subfolder,
-                        filename=filename,
-                        local_dir=os.path.join(PROJECT_ROOT, "checkpoints"),
-                    )
-                    download_success = True
-                except Exception as e:
-                    print(f"[GUI] Primary download from '{subfolder}' failed: {e}. Trying fallback 'lora/'...")
-                    try:
-                        from huggingface_hub import hf_hub_download
-                        hf_hub_download(
-                            repo_id="carnol16/timbral-transfer",
-                            subfolder="lora",
-                            filename=filename,
-                            local_dir=os.path.join(PROJECT_ROOT, "checkpoints"),
-                        )
-                        fallback_path = os.path.join(PROJECT_ROOT, "checkpoints", "lora", filename)
-                        if os.path.exists(fallback_path) and not os.path.exists(adapter_full):
-                            import shutil
-                            shutil.copy2(fallback_path, adapter_full)
-                        download_success = True
-                    except Exception as e2:
-                        print(f"[GUI] Warning: Failed to download LoRA from Hugging Face: {e2}")
-
-                cache_dir = os.path.join(PROJECT_ROOT, "checkpoints", ".cache")
-                if os.path.exists(cache_dir):
-                    import shutil
-                    shutil.rmtree(cache_dir, ignore_errors=True)
-
-                if download_success and os.path.exists(adapter_full):
-                    print(f"[GUI] Successfully downloaded {filename}!")
-                elif not os.path.exists(adapter_full):
-                    # Graceful local fallback to v1 if v2 was unavailable
-                    _, fallback_rel = get_curated_adapter_path(instrument_id, version="v1")
-                    fallback_full = os.path.join(PROJECT_ROOT, fallback_rel)
-                    if os.path.exists(fallback_full):
-                        print(f"[GUI] Notice: v2 adapter not found on disk; falling back to v1 adapter: {fallback_rel}")
-                        adapter_full = fallback_full
-
-            print(f"[GUI] Applying Studio LoRA: {preset_name} [{os.path.basename(rel_path)}] (Strength: {lora_strength:.2f})")
-            self.set_lora_adapter(adapter_full, strength=lora_strength)
-            is_lora_active = True
+        elif use_lora and instrument_id in V3_LORA_MAP:
+            lname, rel_path = V3_LORA_MAP[instrument_id]
+            try:
+                full = ensure_checkpoint(rel_path)
+                print(f"[GUI] Applying v3 Studio LoRA: {lname} (Strength: {lora_strength:.2f})")
+                self.set_lora_adapter(full, strength=lora_strength)
+            except Exception as e:
+                print(f"[GUI] Warning: could not get v3 LoRA {rel_path} ({e}); running pure v3.")
+                self.set_lora_adapter(None, strength=0.0)
         else:
-            print("[GUI] Running Pure Base Slakh Model (No LoRA)")
+            print("[GUI] Running pure v3 base model (no LoRA)")
             self.set_lora_adapter(None, strength=0.0)
-            is_lora_active = False
-
-        # Route normalization stats: clean stats for v2 LoRA, legacy stats for v1 LoRA and base model
-        self.update_norm_stats(use_clean=use_clean_norm if is_lora_active else False)
 
         audio_np = librosa.load(audio_path, sr=SR, mono=True)[0]
 
@@ -430,14 +506,34 @@ class InferenceEngine:
             audio_for_encoding = audio_np
             encode_input_path = audio_path
 
-        print("[GUI] Encoding...")
-        latent_norm = self._encode(encode_input_path)
+        # Frame grid = the SAME-L latent hop: 1 frame = 4096 samples (92.9 ms), exactly as in training
+        # (131072-sample clips -> 32 frames). The frame count used to come from the encoder, whose
+        # chunked encode drops frames on long files (16.25 s -> 172 instead of 175 frames). The contour
+        # was then stretched over too few frames and the output drifted ahead of the input (~0.25 s
+        # by the end of a 16 s file). Generation never used the encoded latent itself, only its length,
+        # so we skip the encode and derive the grid from the sample count.
+        LATENT_HOP = 4096
+        total_frames = int(np.ceil(len(audio_for_encoding) / LATENT_HOP))
+        audio_grid = np.pad(audio_for_encoding, (0, total_frames * LATENT_HOP - len(audio_for_encoding)))
 
         print("[GUI] Extracting contours...")
-        contour = extract_contours(audio_for_encoding, target_len=latent_norm.shape[1])  # (9, seq_len)
-        contour_6 = contour[:6, :].copy()
+        contour = extract_contours(audio_grid, target_len=total_frames)  # (9, total_frames)
+        contour = contour.copy()                 # raw (9, seq_len); pitch edits below go into this
+        contour_6 = contour[:6, :]               # view: pitch edits + returned for the debug plots
         
-        # 2. REGISTER ALIGNMENT (Transpose into Target Instrument Range preserving musical key)
+        # 1. OPTIONAL: 12-TET Chromatic Pitch Snapping (Auto-Tune to exact semitones)
+        voiced_mask = contour_6[1, :] > 0.25
+        if snap_to_semitones and voiced_mask.any():
+            f0 = np.exp(contour_6[0])
+            midi = np.round(69.0 + 12.0 * np.log2(np.maximum(f0, 1e-4) / 440.0))
+            f0_snapped = 440.0 * (2.0 ** ((midi - 69.0) / 12.0))
+            contour_6[0, voiced_mask] = np.log(f0_snapped[voiced_mask])
+            contour_6[0] = fill_unvoiced(contour_6[0], voiced_mask)
+            print("[GUI] 12-TET Pitch Snapping applied: Locked voiced frames to discrete equal-temperament semitones.")
+
+        # 2. REGISTER ALIGNMENT (Transpose into Target Instrument Range preserving musical key).
+        # Re-enabled Nov 10 2026 for v3: it follows pitch exactly, so notes outside an instrument's range
+        # came out unvoiced (e.g. a sax ending on G3 rendered as flute). Whole octaves only, key preserved.
         shift_octaves = 0
         voiced_mask = contour_6[1, :] > 0.5
         if voiced_mask.any():
@@ -453,26 +549,18 @@ class InferenceEngine:
                 print(f"[GUI] Input pitch range (5th-95th): {np.exp(f_low):.1f} Hz – {np.exp(f_high):.1f} Hz")
                 print(f"[GUI] {inst_name} playable range: {np.exp(inst_min):.1f} Hz – {np.exp(inst_max):.1f} Hz")
 
-                input_span = f_high - f_low
-                inst_span = inst_max - inst_min
-
-                if input_span <= inst_span:
-                    if f_low < inst_min:
-                        # Melody is too low: shift up minimum octaves needed to clear lower bound
-                        octaves_needed = (inst_min - f_low) / np.log(2)
-                        shift_octaves = int(np.ceil(octaves_needed))
-                    elif f_high > inst_max:
-                        # Melody is too high: shift down minimum octaves needed to clear upper bound
-                        octaves_needed = (f_high - inst_max) / np.log(2)
-                        shift_octaves = -int(np.ceil(octaves_needed))
-                    else:
-                        # Fully within range: 100% original pitch preserved!
-                        shift_octaves = 0
-                else:
-                    # Input span exceeds instrument range: center phrase to balance both boundaries
-                    phrase_mid = (f_low + f_high) / 2.0
-                    inst_mid = (inst_min + inst_max) / 2.0
-                    shift_octaves = int(round((inst_mid - phrase_mid) / np.log(2)))
+                # Pick the whole-octave shift that leaves the fewest voiced frames outside the
+                # instrument's range. Stay at 0 unless a shift fixes at least AUTO_OCTAVE_MIN_GAIN of the
+                # frames, so one borderline note (e.g. 192 Hz vs violin's 196 Hz G3) can't move a whole phrase.
+                AUTO_OCTAVE_MIN_GAIN = 0.10
+                def frac_out(k):
+                    f = voiced_f0 + k * np.log(2)
+                    return float(np.mean((f < inst_min) | (f > inst_max)))
+                cands = {k: frac_out(k) for k in range(-3, 4)}
+                best_k = min(cands, key=lambda k: (cands[k], abs(k)))   # ties -> smallest shift
+                shift_octaves = best_k if cands[0] - cands[best_k] >= AUTO_OCTAVE_MIN_GAIN else 0
+                print(f"[GUI] Out-of-range frames: {cands[0]:.0%} unshifted, {cands[shift_octaves]:.0%} with "
+                      f"{shift_octaves:+d} octave(s)")
             else:
                 try:
                     shift_octaves = int(octave_shift)
@@ -481,21 +569,20 @@ class InferenceEngine:
 
             if shift_octaves != 0:
                 contour_shift = shift_octaves * np.log(2)
-                contour_6[0, voiced_mask] += contour_shift
+                contour_6[0] += contour_shift
                 print(f"[GUI] Transposed melody by {shift_octaves:+d} octave(s) to fit {INSTRUMENT_NAMES.get(instrument_id, '')}.")
             else:
                 print(f"[GUI] Preserved original pitch (0 octave shift). Within {INSTRUMENT_NAMES.get(instrument_id, '')} playable range.")
                 
-        # 3. Standard Dataset Normalization
-        contour_norm = (contour_6 - self.contour_mean) / self.contour_std
-        total_frames = latent_norm.shape[1]
+        # 3. Normalization: the exact transform the selected base model was trained with
+        contour_norm = self.normalize_for_model(contour, timbre_mode, instrument_id)
 
         # 4. Adaptive Windowing vs Single-Pass Generation
         if total_frames <= 40:
             # Short audio (<= ~3.7s): Standard single-pass (fastest, zero crossfade seams)
             cond_contour = (
                 torch.from_numpy(contour_norm.astype("float32"))
-                .unsqueeze(0).transpose(1, 2).to(DEVICE)    # (1, seq_len, 6)
+                .unsqueeze(0).transpose(1, 2).to(DEVICE)    # (1, seq_len, C)
             )
             print(f"[GUI] Single-pass DDIM {ddim_steps} steps, Contour-CFG={cfg_scale}, Inst-CFG={cfg_inst_scale}...")
             latent_out = self._ddim_loop(cond_contour, instrument_id, cfg_scale, ddim_steps, progress_cb, cfg_inst_scale=cfg_inst_scale)
@@ -532,23 +619,32 @@ class InferenceEngine:
             num_windows = len(windows)
             print(f"[GUI] Sliced {total_frames} frames into {num_windows} hybrid windows: {windows}")
 
-            cond_list = [torch.from_numpy(contour_norm[:, st:en].T.astype("float32")) for (st, en) in windows]
-            cond_batch = torch.stack(cond_list, dim=0).to(DEVICE) # (num_windows, window_size, 6)
+            # Trapezoidal Hann blend weights (used by both blend modes)
+            weights = [self._generate_window_weights(window_size, 0 if idx == 0 else overlap,
+                                                     0 if idx == num_windows - 1 else overlap)
+                       for idx in range(num_windows)]
 
-            print(f"[GUI] Running parallel batched DDIM {ddim_steps} steps across {num_windows} windows on GPU...")
-            x_windows = self._ddim_loop(cond_batch, instrument_id, cfg_scale, ddim_steps, progress_cb, cfg_inst_scale=cfg_inst_scale)
+            if blend_mode == "synced":
+                print(f"[GUI] Synced (MultiDiffusion) DDIM {ddim_steps} steps across {num_windows} windows: "
+                      f"overlaps averaged after every step...")
+                cond_full = torch.from_numpy(contour_norm.T.astype("float32")).unsqueeze(0).to(DEVICE)  # (1, T, C)
+                latent_out = self._ddim_loop_synced(cond_full, windows, weights, instrument_id, cfg_scale,
+                                                    ddim_steps, progress_cb, cfg_inst_scale=cfg_inst_scale)
+            else:
+                cond_list = [torch.from_numpy(contour_norm[:, st:en].T.astype("float32")) for (st, en) in windows]
+                cond_batch = torch.stack(cond_list, dim=0).to(DEVICE) # (num_windows, window_size, C)
 
-            # Stitch latents with trapezoidal Hann blending
-            latent_out = torch.zeros(1, total_frames, 256, device=DEVICE)
-            weight_acc = torch.zeros(1, total_frames, 1, device=DEVICE)
-            for idx, (st, en) in enumerate(windows):
-                ov_l = 0 if idx == 0 else overlap
-                ov_r = 0 if idx == num_windows - 1 else overlap
-                w_np = self._generate_window_weights(window_size, ov_l, ov_r)
-                w_t = torch.from_numpy(w_np).to(DEVICE).unsqueeze(0).unsqueeze(-1)
-                latent_out[:, st:en, :] += x_windows[idx:idx+1] * w_t
-                weight_acc[:, st:en, :] += w_t
-            latent_out = latent_out / (weight_acc + 1e-8)
+                print(f"[GUI] Standard blending: parallel batched DDIM {ddim_steps} steps across {num_windows} "
+                      f"independent windows, overlap-added once at the end...")
+                x_windows = self._ddim_loop(cond_batch, instrument_id, cfg_scale, ddim_steps, progress_cb, cfg_inst_scale=cfg_inst_scale)
+
+                latent_out = torch.zeros(1, total_frames, 256, device=DEVICE)
+                weight_acc = torch.zeros(1, total_frames, 1, device=DEVICE)
+                for idx, (st, en) in enumerate(windows):
+                    w_t = torch.from_numpy(weights[idx]).to(DEVICE).unsqueeze(0).unsqueeze(-1)
+                    latent_out[:, st:en, :] += x_windows[idx:idx+1] * w_t
+                    weight_acc[:, st:en, :] += w_t
+                latent_out = latent_out / (weight_acc + 1e-8)
 
         print("[GUI] Decoding...")
         audio_out = self._decode(latent_out)
