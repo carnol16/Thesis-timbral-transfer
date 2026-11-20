@@ -102,9 +102,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if DEVICE == "cuda":
-        model = AutoencoderModel.from_pretrained("same-l")
+        model = AutoencoderModel.from_pretrained("same-l", device=DEVICE)
     else:
-        model = AutoencoderModel.from_pretrained("same-s")
+        model = AutoencoderModel.from_pretrained("same-s", device=DEVICE)
 
     if args.latent_dir and args.out_dir:
         # BATCH DIRECTORY MODE: Decodes all .npy files in latent_dir

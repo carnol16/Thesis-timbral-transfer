@@ -119,9 +119,9 @@ if __name__ == "__main__":
 
     print("Loading Autoencoder...")
     if DEVICE == "cuda":
-        model = AutoencoderModel.from_pretrained("same-l")
+        model = AutoencoderModel.from_pretrained("same-l", device=DEVICE)
     else:
-        model = AutoencoderModel.from_pretrained("same-s")
+        model = AutoencoderModel.from_pretrained("same-s", device=DEVICE)
 
     audio_t = torch.from_numpy(y).unsqueeze(0).unsqueeze(0).to(DEVICE)
     
